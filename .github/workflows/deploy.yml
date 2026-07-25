@@ -1,0 +1,48 @@
+name: FinFlow CI/CD - Despliegue Manos Libres
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy a producción vía SSH
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      # Ningún desarrollador entra por SSH manualmente: el runner de
+      # GitHub Actions es el único que se conecta, usando una llave
+      # dedicada guardada en Secrets, nunca en el repo.
+      - name: Desplegar en el servidor de producción
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd /opt/finflow-devops
+
+            echo ">> Descargando últimos cambios de main..."
+            git pull origin main
+
+            echo ">> Reconstruyendo y desplegando contenedores..."
+            docker compose pull || true
+            docker compose up -d --build
+
+            echo ">> Re-escalando backend a 3 réplicas..."
+            docker compose up -d --scale backend-service=3 --no-recreate
+
+            echo ">> Limpiando imágenes huérfanas..."
+            docker image prune -f
+
+            echo ">> Verificando estado de los contenedores..."
+            docker compose ps
+
+      - name: Resultado
+        if: success()
+        run: echo "✔ Despliegue completado. Luz Verde en la rama main."

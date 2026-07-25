@@ -1,0 +1,88 @@
+version: "3.9"
+
+# =========================================================================
+#  FinFlow — AWS Cloud Resiliency & Scaling Sprint
+#  Cumple los 4 requerimientos del CEO:
+#   1) Alta disponibilidad -> nginx + 3 réplicas de backend-service
+#   2) Hardening           -> db sin "ports:" + red privada "internal: true"
+#   3) CI/CD manos libres  -> ver .github/workflows/deploy.yml
+#   4) Resiliencia SRE     -> restart: unless-stopped + backup_agent.sh
+# =========================================================================
+
+services:
+
+  nginx:
+    image: nginx:alpine
+    container_name: finflow-gateway
+    ports:
+      - "80:80"          # única puerta de entrada pública
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend-service
+    networks:
+      - public-net
+      - private-net
+    restart: unless-stopped
+
+  backend-service:
+    build: ./backend
+    # NO pongas "container_name:" aquí — un nombre fijo rompe --scale
+    # NO pongas "ports:" aquí — solo nginx debe ser accesible desde fuera
+    networks:
+      - private-net
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=finflow
+      - DB_PASSWORD=${DB_PASSWORD:-changeme_in_prod}
+      - DB_NAME=finflow
+    depends_on:
+      - db
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"      # Escalamiento vertical: máx 0.50 CPUs
+          memory: 128M      # Escalamiento vertical: máx 128M RAM
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped   # RTO < 5s ante SIGKILL / caídas
+
+  db:
+    image: postgres:15-alpine
+    container_name: finflow-db
+    networks:
+      - private-net
+    # Hardening perimetral: SIN "ports:" -> el 5432 NO está expuesto al host
+    # ni a internet, solo es alcanzable dentro de private-net.
+    environment:
+      - POSTGRES_USER=finflow
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-changeme_in_prod}
+      - POSTGRES_DB=finflow
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./backups:/backups
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"      # Escalamiento vertical: máx 1.0 CPU
+          memory: 512M      # Escalamiento vertical: máx 512M RAM
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finflow"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+networks:
+  public-net:
+    driver: bridge
+  private-net:
+    driver: bridge
+    internal: true   # Aísla totalmente esta red de internet a nivel Docker
+
+volumes:
+  db-data:
